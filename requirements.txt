@@ -1,0 +1,17 @@
+langchain
+langchain-community
+langchain-openai
+langchain-chroma
+sentence-transformers
+rank_bm25
+pypdf
+gradio
+openai
+python-dotenv
+tiktoken
+faiss-cpu
+flask
+requests
+torch
+fpdf
+# bge-reranker can be used via sentence-transformers
