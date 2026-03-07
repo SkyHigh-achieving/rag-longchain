@@ -1,0 +1,28 @@
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Models & Data (Too large for GitHub)
+models/
+data/*.pdf
+vector_db/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Environment variables
+.env
+
+# Logs
+*.log
+run.log
+
+# IDE files
+.vscode/
+.idea/
+*.html
