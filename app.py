@@ -63,6 +63,8 @@ def query_system(query, top_k=5, mode="Advanced"):
     """Handles user queries and returns answers with context."""
     if not retriever:
         return "请先上传并解析 PDF。", ""
+    if not query or not str(query).strip():
+        return "请输入问题后再提问。", ""
     
     # Advanced Retrieval with Rerank
     if mode == "Advanced":
@@ -71,11 +73,21 @@ def query_system(query, top_k=5, mode="Advanced"):
         # Simulate standard RAG (Vector only)
         context_docs = retriever.vector_retriever.invoke(query)[:top_k]
     
-    # Generation
-    answer = generator.generate(query, context_docs)
-    
-    # Format context for display
     context_display = "\n\n---\n\n".join([f"**Source {i+1}**: {doc.page_content}" for i, doc in enumerate(context_docs)])
+    
+    try:
+        answer = generator.generate(query, context_docs)
+    except Exception as e:
+        err_text = str(e)
+        if "Connection error" in err_text:
+            fallback = context_docs[0].page_content[:500] if context_docs else "未检索到可用片段。"
+            answer = (
+                "LLM 服务当前不可连接（通常是本地 Ollama 未启动或 API 地址不可达）。\n\n"
+                "先给出基于检索结果的参考摘要：\n"
+                f"{fallback}"
+            )
+        else:
+            answer = f"生成阶段失败：{err_text}"
     
     return answer, context_display
 
