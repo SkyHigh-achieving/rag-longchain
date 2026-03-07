@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Advanced Academic RAG System
 
 > **Graduate Interview Project** (Designed for THU/ZJU/PKU CS Recruitment)
@@ -51,3 +52,7 @@
 
 - **Q: 系统如何处理大规模 PDF 的解析?**
   - *A: 项目使用了多级切分策略，在保持段落完整性的同时通过叠加 Overlap 机制避免了上下文截断导致的语义丢失。*
+=======
+# rag-longchain
+本地化检索增强生成系统
+>>>>>>> 92417278e49d5fb6d9e3947d2cc036acec82f28d
