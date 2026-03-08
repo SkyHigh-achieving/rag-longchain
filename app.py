@@ -3,6 +3,8 @@ import re
 import json
 import math
 import time
+import csv
+import io
 from urllib.parse import quote
 from urllib.request import urlopen
 
@@ -262,6 +264,7 @@ def compare_attention_modes(query, top_k=3):
     adv_hit_curve, std_hit_curve = [], []
     adv_tps_curve, std_tps_curve = [], []
     adv_ttft_curve, std_ttft_curve = [], []
+    csv_rows = [["k", "strategy", "concentration", "entropy", "ttft", "tps", "hit_ratio"]]
     last_adv = None
     last_std = None
     last_adv_hit = (False, 0.0)
@@ -279,6 +282,14 @@ def compare_attention_modes(query, top_k=3):
         std_top1 = std["ranked"][0] if std["ranked"] else {"index": -1, "text": ""}
         adv_hit, adv_ratio = _top1_hit(answer_adv, adv_top1["text"])
         std_hit, std_ratio = _top1_hit(answer_std, std_top1["text"])
+        
+        # Calculate entropies for CSV
+        adv_ent = -sum(item["weight"] * math.log(max(item["weight"], 1e-9)) for item in adv["all_scores"])
+        std_ent = -sum(item["weight"] * math.log(max(item["weight"], 1e-9)) for item in std["all_scores"])
+        
+        csv_rows.append([kk, "Advanced", adv["concentration"], adv_ent, adv_ttft, adv_tps, adv_ratio])
+        csv_rows.append([kk, "Standard", std["concentration"], std_ent, std_ttft, std_tps, std_ratio])
+        
         adv_conc.append(adv["concentration"])
         std_conc.append(std["concentration"])
         adv_hit_curve.append(min(1.0, adv_ratio * 2.0))
@@ -330,7 +341,16 @@ def compare_attention_modes(query, top_k=3):
             "Standard-TTFT*": std_ttft_norm
         }
     )
-    return "\n".join(lines), chart_1 + chart_2
+    
+    csv_path = os.path.join(DATA_DIR, "research_results.csv")
+    try:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerows(csv_rows)
+    except Exception:
+        csv_path = None
+
+    return "\n".join(lines), chart_1 + chart_2, csv_path
 
 # Gradio Interface
 with gr.Blocks(title="论文问答系统") as demo:
@@ -368,13 +388,14 @@ with gr.Blocks(title="论文问答系统") as demo:
                 attn_out = gr.Textbox(label="Attention 解释结果", lines=8, max_lines=14)
                 compare_btn = gr.Button("对照评估 Advanced vs Standard")
                 compare_out = gr.Textbox(label="研究对照结果", lines=8, max_lines=14)
+                csv_file_out = gr.File(label="下载研究原始数据 (CSV)")
                 compare_curve_out = gr.HTML(label="研究对照曲线")
             with gr.Column(scale=1):
                 context_out = gr.Textbox(label="检索证据片段（Source）", lines=18, max_lines=36)
         
         ask_btn.click(query_system, inputs=[query_in, k_slider, mode_choice, lang_choice], outputs=[answer_out, context_out])
         attn_btn.click(inspect_attention, inputs=[query_in, k_slider, mode_choice], outputs=[attn_out])
-        compare_btn.click(compare_attention_modes, inputs=[query_in, k_slider], outputs=[compare_out, compare_curve_out])
+        compare_btn.click(compare_attention_modes, inputs=[query_in, k_slider], outputs=[compare_out, compare_curve_out, csv_file_out])
 
 if __name__ == "__main__":
     demo.queue()
