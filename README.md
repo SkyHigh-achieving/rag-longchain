@@ -31,6 +31,8 @@
 
 ## 🚀 快速启动
 
+### Windows (PowerShell)
+
 1. **安装依赖**:
    ```powershell
    ./setup_local.ps1
@@ -42,6 +44,22 @@
 3. **运行演示**:
    ```powershell
    .\.venv\Scripts\python.exe app.py
+   ```
+
+### Linux / AutoDL (Bash)
+
+1. **安装依赖**:
+   ```bash
+   chmod +x setup_autodl.sh
+   ./setup_autodl.sh
+   ```
+2. **下载模型**:
+   ```bash
+   ./.venv/bin/python download_models.py
+   ```
+3. **运行演示**:
+   ```bash
+   ./.venv/bin/python app.py
    ```
 
 ## 📝 面试 Q&A 准备
