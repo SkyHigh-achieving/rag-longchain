@@ -5,6 +5,7 @@ import math
 import time
 import csv
 import io
+import datetime
 from urllib.parse import quote
 from urllib.request import urlopen
 
@@ -350,7 +351,56 @@ def compare_attention_modes(query, top_k=3):
     except Exception:
         csv_path = None
 
-    return "\n".join(lines), chart_1 + chart_2, csv_path
+    # Generate HTML Report
+    html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>RAG 模型注意力机制深度对照报告</title>
+<style>
+  body {{ font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 900px; margin: 40px auto; padding: 20px; line-height: 1.6; color: #333; }}
+  h1 {{ border-bottom: 2px solid #eee; padding-bottom: 10px; }}
+  .summary {{ background: #f9f9f9; padding: 20px; border-radius: 8px; border-left: 5px solid #007bff; white-space: pre-wrap; font-family: monospace; font-size: 14px; }}
+  .charts {{ margin-top: 40px; text-align: center; }}
+  .chart-container {{ margin-bottom: 40px; border: 1px solid #eee; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }}
+  svg {{ max-width: 100%; height: auto; }}
+  .timestamp {{ color: #999; font-size: 12px; margin-top: 50px; text-align: right; border-top: 1px solid #eee; padding-top: 10px; }}
+</style>
+</head>
+<body>
+  <h1>RAG 模型注意力机制深度对照报告</h1>
+  
+  <h2>1. 研究结论摘要</h2>
+  <div class="summary">{"".join(lines)}</div>
+  
+  <h2>2. 可视化分析图表</h2>
+  <div class="charts">
+    <div class="chart-container">
+      <h3>解释性曲线（Cognitive Behavior）</h3>
+      {chart_1}
+    </div>
+    <div class="chart-container">
+      <h3>性能曲线（System Engineering）</h3>
+      {chart_2}
+    </div>
+  </div>
+  
+  <div class="timestamp">
+    生成时间: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+  </div>
+</body>
+</html>"""
+    
+    timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    html_filename = f"research_report_{timestamp_str}.html"
+    html_path = os.path.join(DATA_DIR, html_filename)
+    try:
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+    except Exception:
+        html_path = None
+
+    return "\n".join(lines), chart_1 + chart_2, csv_path, html_path
 
 # Gradio Interface
 with gr.Blocks(title="论文问答系统") as demo:
@@ -388,14 +438,16 @@ with gr.Blocks(title="论文问答系统") as demo:
                 attn_out = gr.Textbox(label="Attention 解释结果", lines=8, max_lines=14)
                 compare_btn = gr.Button("对照评估 Advanced vs Standard")
                 compare_out = gr.Textbox(label="研究对照结果", lines=8, max_lines=14)
-                csv_file_out = gr.File(label="下载研究原始数据 (CSV)")
+                with gr.Row():
+                    csv_file_out = gr.File(label="下载研究原始数据 (CSV)")
+                    html_report_out = gr.File(label="下载完整研究报告 (HTML)")
                 compare_curve_out = gr.HTML(label="研究对照曲线")
             with gr.Column(scale=1):
                 context_out = gr.Textbox(label="检索证据片段（Source）", lines=18, max_lines=36)
         
         ask_btn.click(query_system, inputs=[query_in, k_slider, mode_choice, lang_choice], outputs=[answer_out, context_out])
         attn_btn.click(inspect_attention, inputs=[query_in, k_slider, mode_choice], outputs=[attn_out])
-        compare_btn.click(compare_attention_modes, inputs=[query_in, k_slider], outputs=[compare_out, compare_curve_out, csv_file_out])
+        compare_btn.click(compare_attention_modes, inputs=[query_in, k_slider], outputs=[compare_out, compare_curve_out, csv_file_out, html_report_out])
 
 if __name__ == "__main__":
     demo.queue()

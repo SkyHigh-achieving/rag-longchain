@@ -14,4 +14,5 @@ flask
 requests
 torch
 fpdf
+wandb
 # bge-reranker can be used via sentence-transformers

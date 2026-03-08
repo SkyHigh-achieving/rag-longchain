@@ -22,7 +22,8 @@ os.environ["SENTENCE_TRANSFORMERS_HOME"] = models_dir
 try:
     from modelscope import snapshot_download
 except ImportError:
-    print("缺少 modelscope，请先执行: .\\.venv\\Scripts\\python.exe -m pip install modelscope")
+    python_path = ".\\.venv\\Scripts\\python.exe" if os.name == 'nt' else "./.venv/bin/python"
+    print(f"缺少 modelscope，请先执行: {python_path} -m pip install modelscope")
     sys.exit(1)
 
 

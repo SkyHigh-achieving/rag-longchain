@@ -62,6 +62,26 @@
    ./.venv/bin/python app.py
    ```
 
+### 🐳 Ollama 本地模型 (AutoDL / Linux)
+
+如果你想在 AutoDL 上运行本地 Qwen-7B，请按照以下步骤操作（推荐在 `/root/autodl-tmp` 目录下操作以节省空间）：
+
+1. **安装 Ollama**:
+   ```bash
+   curl -fsSL https://ollama.com/install.sh | sh
+   ```
+2. **启动 Ollama 服务 (后台)**:
+   ```bash
+   # 设置模型存储路径到数据盘
+   export OLLAMA_MODELS=$(pwd)/models/ollama
+   ollama serve > ollama.log 2>&1 &
+   ```
+3. **下载并运行 Qwen2.5-7B**:
+   ```bash
+   # 使用本项目封装的脚本下载（会自动设置路径）
+   ./.venv/bin/python download_models.py --with-ollama-qwen --ollama-model qwen2.5:7b
+   ```
+
 ## 📝 面试 Q&A 准备
 
 - **Q: 为什么在有了向量搜索后还需要重排层 (Reranker)?**
