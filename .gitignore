@@ -22,6 +22,8 @@ __pycache__/
 # Logs
 *.log
 run.log
+wandb/
+experiment_results/
 
 # IDE files
 .vscode/
