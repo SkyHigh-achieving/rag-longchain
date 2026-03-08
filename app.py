@@ -1,6 +1,8 @@
 import os
 import re
 import json
+import math
+import time
 from urllib.parse import quote
 from urllib.request import urlopen
 
@@ -83,8 +85,8 @@ def build_retrieval_fallback(context_docs, output_lang):
     body = "\n".join(snippets) if snippets else "未检索到可用片段。"
     if output_lang != "英文":
         body = translate_to_chinese(body)
-        return "⚠️ **LLM 服务当前不可连接**\n\n原因：系统未检测到运行中的 Ollama 服务 (http://localhost:11434)。\n\n**解决建议：**\n1. 如果您想使用**本地模型**：请确保已安装 [Ollama](https://ollama.com/) 并执行 `ollama serve`。\n2. 如果您想使用**云端 API**：请修改项目根目录下的 `.env` 文件中的 `OPENAI_API_BASE` 和 `OPENAI_API_KEY`。\n\n--- \n**基于检索结果的中文摘要：**\n" + body
-    return "⚠️ **LLM is unavailable**\n\nOllama service not detected at http://localhost:11434.\n\n**Solution:**\n1. **Local**: Install [Ollama](https://ollama.com/) and run `ollama serve`.\n2. **Cloud**: Update `OPENAI_API_BASE` and `OPENAI_API_KEY` in `.env` file.\n\n---\n**Evidence snippets:**\n" + body
+        return "⚠️ **LLM 服务当前不可连接**\n\n原因：当前 `OPENAI_API_BASE / OPENAI_API_KEY / MODEL_NAME` 配置不可用。\n\n**解决建议：**\n1. 优先使用**云端 API**：在 `.env` 中配置可用的 `OPENAI_API_BASE`、`OPENAI_API_KEY` 与 `MODEL_NAME`。\n2. 如果使用**本地 OpenAI 兼容服务**：请先启动本地服务，并确认 `.env` 中地址正确。\n\n--- \n**基于检索结果的中文摘要：**\n" + body
+    return "⚠️ **LLM is unavailable**\n\nCurrent `OPENAI_API_BASE / OPENAI_API_KEY / MODEL_NAME` config is unavailable.\n\n**Solution:**\n1. Prefer **cloud API**: set valid `OPENAI_API_BASE`, `OPENAI_API_KEY`, and `MODEL_NAME` in `.env`.\n2. If using a **local OpenAI-compatible service**, start it first and ensure the endpoint is correct.\n\n---\n**Evidence snippets:**\n" + body
 
 def process_pdfs(file_list):
     """Handles PDF uploads and initializes the retriever."""
@@ -110,46 +112,232 @@ def process_pdfs(file_list):
     return f"成功加载 {len(file_list)} 个文件，共 {len(all_docs)} 个文本切分片段。重排模型：{rerank_status}"
 
 def query_system(query, top_k=5, mode="Advanced", output_lang="中文"):
-    """Handles user queries and returns answers with context."""
     if not retriever:
-        return "请先上传并解析 PDF。", ""
+        yield "请先上传并解析 PDF。", ""
+        return
     if not query or not str(query).strip():
-        return "请输入问题后再提问。", ""
-    
-    # Advanced Retrieval with Rerank
+        yield "请输入问题后再提问。", ""
+        return
+
     if mode == "Advanced":
         context_docs = retriever.retrieve_with_rerank(query, top_k=top_k)
     else:
-        # Simulate standard RAG (Vector only)
         context_docs = retriever.vector_retriever.invoke(query)[:top_k]
-    
-    context_display = "\n\n---\n\n".join([f"**Source {i+1}**: {doc.page_content}" for i, doc in enumerate(context_docs)])
-    
+
+    context_display = "\n\n".join([f"[证据 {i+1}]\n{doc.page_content}" for i, doc in enumerate(context_docs)])
+    yield "正在生成回答，请稍候...", context_display
+
     try:
-        answer = generator.generate(query, context_docs)
+        stream_enabled = hasattr(generator, "stream_generate")
+        answer = ""
+        if stream_enabled and output_lang == "英文":
+            for chunk in generator.stream_generate(query, context_docs):
+                if not chunk:
+                    continue
+                answer += chunk
+                yield answer, context_display
+            return
+        if stream_enabled:
+            answer = "".join(generator.stream_generate(query, context_docs))
+        else:
+            answer = generator.generate(query, context_docs)
         if output_lang != "英文":
             answer = translate_to_chinese(answer)
+            yield answer, context_display
+            return
+        progressive = ""
+        chunk_size = 12
+        for i in range(0, len(answer), chunk_size):
+            progressive += answer[i:i + chunk_size]
+            yield progressive, context_display
     except Exception as e:
         err_text = str(e)
-        if "Connection error" in err_text:
+        lower_err = err_text.lower()
+        if any(k in lower_err for k in ["connection", "connect", "timeout", "api key", "authentication", "401", "403", "404", "429"]):
             answer = build_retrieval_fallback(context_docs, output_lang)
         else:
             answer = f"生成阶段失败：{err_text}"
-    
-    return answer, context_display
+        yield answer, context_display
+
+def inspect_attention(query, top_k=3, mode="Advanced"):
+    if not retriever:
+        return "请先上传并解析 PDF。"
+    if not query or not str(query).strip():
+        return "请输入问题后再分析。"
+    if not getattr(generator, "use_local_hf", False):
+        return "当前仅本地 HuggingFace 模式支持注意力分析。"
+    if mode == "Advanced":
+        context_docs = retriever.retrieve_with_rerank(query, top_k=top_k)
+    else:
+        context_docs = retriever.vector_retriever.invoke(query)[:top_k]
+    return generator.analyze_attention(query, context_docs, top_n=min(3, int(top_k)))
+
+def _normalize_for_overlap(text):
+    text = (text or "").lower()
+    text = re.sub(r"[\W_]+", " ", text, flags=re.UNICODE)
+    return [t for t in text.split() if len(t) >= 2]
+
+def _top1_hit(answer, top1_text):
+    ans_tokens = set(_normalize_for_overlap(answer))
+    doc_tokens = set(_normalize_for_overlap(top1_text))
+    if not ans_tokens or not doc_tokens:
+        return False, 0.0
+    inter = len(ans_tokens & doc_tokens)
+    ratio = inter / max(len(ans_tokens), 1)
+    return ratio >= 0.12, ratio
+
+def _measure_perf(query, context_docs):
+    start = time.perf_counter()
+    first_token_ts = None
+    chunks = []
+    for chunk in generator.stream_generate(query, context_docs):
+        if first_token_ts is None and str(chunk).strip():
+            first_token_ts = time.perf_counter()
+        chunks.append(chunk)
+    end = time.perf_counter()
+    answer = "".join(chunks)
+    ttft = (first_token_ts - start) if first_token_ts is not None else (end - start)
+    gen_window = max(end - (first_token_ts or start), 1e-6)
+    if getattr(generator, "use_local_hf", False):
+        token_count = len(generator.local_tokenizer.encode(answer, add_special_tokens=False))
+    else:
+        token_count = max(len(answer.split()), 1)
+    tps = token_count / gen_window
+    return answer, float(ttft), float(tps)
+
+def _svg_line_chart(title, x_vals, series_dict):
+    width, height = 760, 280
+    left, right, top, bottom = 56, 24, 36, 44
+    inner_w = width - left - right
+    inner_h = height - top - bottom
+    if not x_vals:
+        return "<div>无可用数据</div>"
+    x_min, x_max = min(x_vals), max(x_vals)
+    if x_min == x_max:
+        x_min -= 1
+        x_max += 1
+    y_min, y_max = 0.0, 1.0
+    def sx(x):
+        return left + (x - x_min) * inner_w / (x_max - x_min)
+    def sy(y):
+        y = max(y_min, min(y_max, y))
+        return top + (y_max - y) * inner_h / (y_max - y_min)
+    colors = ["#2563eb", "#ef4444", "#16a34a", "#a855f7"]
+    names = list(series_dict.keys())
+    svg = [f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">']
+    svg.append(f'<rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff"/>')
+    svg.append(f'<text x="{left}" y="22" font-size="14" fill="#111827">{title}</text>')
+    svg.append(f'<line x1="{left}" y1="{top+inner_h}" x2="{left+inner_w}" y2="{top+inner_h}" stroke="#9ca3af"/>')
+    svg.append(f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top+inner_h}" stroke="#9ca3af"/>')
+    for i in range(6):
+        yv = i / 5
+        yy = sy(yv)
+        svg.append(f'<line x1="{left}" y1="{yy}" x2="{left+inner_w}" y2="{yy}" stroke="#e5e7eb"/>')
+        svg.append(f'<text x="10" y="{yy+4}" font-size="11" fill="#6b7280">{yv:.1f}</text>')
+    for x in x_vals:
+        xx = sx(x)
+        svg.append(f'<line x1="{xx}" y1="{top}" x2="{xx}" y2="{top+inner_h}" stroke="#f3f4f6"/>')
+        svg.append(f'<text x="{xx-4}" y="{top+inner_h+18}" font-size="11" fill="#6b7280">{x}</text>')
+    for i, name in enumerate(names):
+        color = colors[i % len(colors)]
+        points = " ".join([f"{sx(x_vals[j]):.2f},{sy(series_dict[name][j]):.2f}" for j in range(len(x_vals))])
+        svg.append(f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="2.2"/>')
+        legend_x = left + 8 + i * 180
+        legend_y = height - 12
+        svg.append(f'<line x1="{legend_x}" y1="{legend_y}" x2="{legend_x+18}" y2="{legend_y}" stroke="{color}" stroke-width="2.2"/>')
+        svg.append(f'<text x="{legend_x+24}" y="{legend_y+4}" font-size="11" fill="#374151">{name}</text>')
+    svg.append("</svg>")
+    return "".join(svg)
+
+def compare_attention_modes(query, top_k=3):
+    if not retriever:
+        return "请先上传并解析 PDF。"
+    if not query or not str(query).strip():
+        return "请输入问题后再评估。"
+    if not getattr(generator, "use_local_hf", False):
+        return "当前仅本地 HuggingFace 模式支持该评估。"
+    k = int(top_k)
+    k_values = list(range(1, max(2, min(k, 6)) + 1))
+    adv_conc, std_conc = [], []
+    adv_hit_curve, std_hit_curve = [], []
+    adv_tps_curve, std_tps_curve = [], []
+    adv_ttft_curve, std_ttft_curve = [], []
+    last_adv = None
+    last_std = None
+    last_adv_hit = (False, 0.0)
+    last_std_hit = (False, 0.0)
+    for kk in k_values:
+        docs_adv = retriever.retrieve_with_rerank(query, top_k=kk)
+        docs_std = retriever.vector_retriever.invoke(query)[:kk]
+        adv = generator.analyze_attention_struct(query, docs_adv, top_n=min(3, kk))
+        std = generator.analyze_attention_struct(query, docs_std, top_n=min(3, kk))
+        if not adv.get("ok") or not std.get("ok"):
+            return f"评估失败：Advanced={adv.get('message', '')} | Standard={std.get('message', '')}", "<div>注意力曲线生成失败</div>"
+        answer_adv, adv_ttft, adv_tps = _measure_perf(query, docs_adv)
+        answer_std, std_ttft, std_tps = _measure_perf(query, docs_std)
+        adv_top1 = adv["ranked"][0] if adv["ranked"] else {"index": -1, "text": ""}
+        std_top1 = std["ranked"][0] if std["ranked"] else {"index": -1, "text": ""}
+        adv_hit, adv_ratio = _top1_hit(answer_adv, adv_top1["text"])
+        std_hit, std_ratio = _top1_hit(answer_std, std_top1["text"])
+        adv_conc.append(adv["concentration"])
+        std_conc.append(std["concentration"])
+        adv_hit_curve.append(min(1.0, adv_ratio * 2.0))
+        std_hit_curve.append(min(1.0, std_ratio * 2.0))
+        adv_tps_curve.append(adv_tps)
+        std_tps_curve.append(std_tps)
+        adv_ttft_curve.append(adv_ttft)
+        std_ttft_curve.append(std_ttft)
+        last_adv = adv
+        last_std = std
+        last_adv_hit = (adv_hit, adv_ratio)
+        last_std_hit = (std_hit, std_ratio)
+    max_tps = max(adv_tps_curve + std_tps_curve + [1e-6])
+    max_ttft = max(adv_ttft_curve + std_ttft_curve + [1e-6])
+    adv_tps_norm = [x / max_tps for x in adv_tps_curve]
+    std_tps_norm = [x / max_tps for x in std_tps_curve]
+    adv_ttft_norm = [1.0 - (x / max_ttft) for x in adv_ttft_curve]
+    std_ttft_norm = [1.0 - (x / max_ttft) for x in std_ttft_curve]
+    adv_entropy = -sum(item["weight"] * math.log(max(item["weight"], 1e-9)) for item in last_adv["all_scores"])
+    std_entropy = -sum(item["weight"] * math.log(max(item["weight"], 1e-9)) for item in last_std["all_scores"])
+    adv_top1 = last_adv["ranked"][0] if last_adv["ranked"] else {"index": -1}
+    std_top1 = last_std["ranked"][0] if last_std["ranked"] else {"index": -1}
+    lines = [
+        "Advanced vs Standard 注意力与证据一致性对照：",
+        f"- Advanced 注意力集中度: {last_adv['concentration']:.3f} | 熵: {adv_entropy:.3f}",
+        f"- Standard 注意力集中度: {last_std['concentration']:.3f} | 熵: {std_entropy:.3f}",
+        f"- Advanced Top1证据命中: {'是' if last_adv_hit[0] else '否'} | 重叠率: {last_adv_hit[1]:.3f} | 证据ID: {adv_top1['index']}",
+        f"- Standard Top1证据命中: {'是' if last_std_hit[0] else '否'} | 重叠率: {last_std_hit[1]:.3f} | 证据ID: {std_top1['index']}",
+        f"- Performance@k={k_values[-1]}: Advanced TTFT={adv_ttft_curve[-1]:.2f}s, TPS={adv_tps_curve[-1]:.2f} | Standard TTFT={std_ttft_curve[-1]:.2f}s, TPS={std_tps_curve[-1]:.2f}",
+        "- 解释：集中度越高代表注意力更聚焦；Top1命中越高代表回答与最关注证据更一致。"
+    ]
+    chart_1 = _svg_line_chart(
+        "解释性曲线（随检索片段数 k 变化）",
+        k_values,
+        {
+            "Advanced-集中度": adv_conc,
+            "Standard-集中度": std_conc,
+            "Advanced-Top1命中代理": adv_hit_curve,
+            "Standard-Top1命中代理": std_hit_curve
+        }
+    )
+    chart_2 = _svg_line_chart(
+        "性能曲线（归一化，越高越好）",
+        k_values,
+        {
+            "Advanced-TPS": adv_tps_norm,
+            "Standard-TPS": std_tps_norm,
+            "Advanced-TTFT*": adv_ttft_norm,
+            "Standard-TTFT*": std_ttft_norm
+        }
+    )
+    return "\n".join(lines), chart_1 + chart_2
 
 # Gradio Interface
-with gr.Blocks(title="高级学术 RAG 系统 (浙大/清华面试版)") as demo:
-    gr.Markdown("# 🎓 高级学术论文 RAG 知识库系统")
-    gr.Markdown("""
-    **面试亮点**:
-    1. **Hybrid Search**: 混合检索 (BM25 + Vector) 捕捉学术专有名词。
-    2. **BGE-Reranker**: 交叉熵重排序，比单纯余弦相似度更精准。
-    3. **Academic Prompting**: 严谨的学术风格提示词，杜绝幻觉。
-    """)
+with gr.Blocks(title="论文问答系统") as demo:
+    gr.Markdown("# 📚 论文问答系统")
     
     # Display System Status
-    llm_source = "本地模型 (Local Ollama/Llama)" if generator.is_local else "云端模型 (OpenAI API)"
+    llm_source = "本地 HuggingFace 模型" if getattr(generator, "use_local_hf", False) else ("本地 OpenAI 兼容服务" if generator.is_local else "云端模型 (OpenAI 兼容 API)")
     hw_status = "🚀 GPU (CUDA) 加速" if torch.cuda.is_available() else "💻 CPU 模式 (已优化多线程)"
     
     # Check Model Readiness
@@ -167,18 +355,27 @@ with gr.Blocks(title="高级学术 RAG 系统 (浙大/清华面试版)") as demo
         upload_btn.click(process_pdfs, inputs=[file_input], outputs=[status_out])
         
     with gr.Tab("2. 智能问答"):
+        gr.Markdown("检索策略说明：Advanced = BM25+向量+重排；Standard = 仅向量。检索片段数量是送入模型的证据条数，数量越大覆盖越广但速度越慢。")
         with gr.Row():
             with gr.Column(scale=2):
                 query_in = gr.Textbox(label="请输入您的问题", placeholder="例如：这篇文章的核心创新点是什么？")
-                mode_choice = gr.Radio(["Advanced", "Standard"], label="检索模式 (Advanced 开启重排序)", value="Advanced")
+                mode_choice = gr.Radio(["Advanced", "Standard"], label="检索策略", value="Advanced")
                 lang_choice = gr.Radio(["中文", "英文"], label="输出语言", value="中文")
-                k_slider = gr.Slider(minimum=1, maximum=10, value=5, step=1, label="检索片段数量")
+                k_slider = gr.Slider(minimum=1, maximum=10, value=3, step=1, label="检索片段数量（证据条数）")
                 ask_btn = gr.Button("提问", variant="primary")
-                answer_out = gr.Markdown(label="回答内容")
+                answer_out = gr.Textbox(label="回答内容", lines=14, max_lines=28)
+                attn_btn = gr.Button("分析 Attention 焦点")
+                attn_out = gr.Textbox(label="Attention 解释结果", lines=8, max_lines=14)
+                compare_btn = gr.Button("对照评估 Advanced vs Standard")
+                compare_out = gr.Textbox(label="研究对照结果", lines=8, max_lines=14)
+                compare_curve_out = gr.HTML(label="研究对照曲线")
             with gr.Column(scale=1):
-                context_out = gr.Markdown(label="检索参考内容")
+                context_out = gr.Textbox(label="检索证据片段（Source）", lines=18, max_lines=36)
         
         ask_btn.click(query_system, inputs=[query_in, k_slider, mode_choice, lang_choice], outputs=[answer_out, context_out])
+        attn_btn.click(inspect_attention, inputs=[query_in, k_slider, mode_choice], outputs=[attn_out])
+        compare_btn.click(compare_attention_modes, inputs=[query_in, k_slider], outputs=[compare_out, compare_curve_out])
 
 if __name__ == "__main__":
+    demo.queue()
     demo.launch(server_name="0.0.0.0", server_port=8000)

@@ -6,6 +6,7 @@ ENV/
 
 # Models & Data (Too large for GitHub)
 models/
+.modelscope/
 data/*.pdf
 vector_db/
 
